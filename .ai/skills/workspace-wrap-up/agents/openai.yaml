@@ -1,0 +1,6 @@
+interface:
+  display_name: "Wrap Up Workspace Work"
+  short_description: "Verify work and report compact evidence"
+  default_prompt: "Use $workspace-wrap-up to verify and finish this work."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,33 @@
+{
+  "nodes": [
+    {
+      "id": "portfolio-intro",
+      "type": "text",
+      "text": "# Independent project portfolio\nProjects are isolated. Edges are added only after a dependency is confirmed in code or configuration.",
+      "x": 0,
+      "y": -260,
+      "width": 520,
+      "height": 160,
+      "color": "5"
+    },
+    {
+      "id": "project-shop",
+      "type": "file",
+      "file": "20-projects/shop/project.md",
+      "x": -440,
+      "y": 0,
+      "width": 360,
+      "height": 220
+    },
+    {
+      "id": "project-support",
+      "type": "file",
+      "file": "20-projects/support/project.md",
+      "x": 0,
+      "y": 0,
+      "width": 360,
+      "height": 220
+    }
+  ],
+  "edges": []
+}

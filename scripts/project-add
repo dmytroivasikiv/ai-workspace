@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Register one local repository in the ignored workspace registry."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+from workspace_lib import WORKSPACE
+
+
+ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR {message}")
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("project_id")
+parser.add_argument("repo_id")
+parser.add_argument("repo_path")
+parser.add_argument("--domain", default="local")
+parser.add_argument("--role", default="application")
+parser.add_argument("--alias", action="append", default=[])
+parser.add_argument("--guide", default="AGENTS.md")
+parser.add_argument("--graph", choices=("on-demand", "persistent", "disabled"), default="on-demand")
+parser.add_argument("--project-path")
+parser.add_argument("--team", action="store_true")
+args = parser.parse_args()
+
+if not ID.fullmatch(args.project_id) or not ID.fullmatch(args.repo_id):
+    fail("project and repository ids must use lowercase letters, numbers, and hyphens")
+if any(not ID.fullmatch(alias) for alias in args.alias):
+    fail("aliases must use lowercase letters, numbers, and hyphens")
+
+registry_path = WORKSPACE / "workspace.yaml"
+if not registry_path.is_file():
+    fail("workspace.yaml is missing; run ./bin/aiw setup first")
+registry = json.loads(registry_path.read_text())
+projects = registry.get("projects", [])
+known_names = {
+    value
+    for row in projects
+    for value in [row.get("id"), *row.get("aliases", [])]
+    if value
+}
+
+repo_path = Path(args.repo_path).expanduser().resolve()
+if not repo_path.is_dir():
+    fail(f"repository path does not exist: {repo_path}")
+relative_repo = os.path.relpath(repo_path, WORKSPACE)
+all_repos = [repo for project in projects for repo in project.get("repos", [])]
+if any(repo.get("id") == args.repo_id for repo in all_repos):
+    fail(f"repository id already exists: {args.repo_id}")
+
+project = next((row for row in projects if row.get("id") == args.project_id), None)
+if project is None:
+    if args.project_id in known_names:
+        fail(f"project id conflicts with an existing id or alias: {args.project_id}")
+    conflicts = sorted(set(args.alias) & known_names)
+    if conflicts:
+        fail(f"alias already exists: {', '.join(conflicts)}")
+    project_path = Path(args.project_path).expanduser().resolve() if args.project_path else repo_path
+    if not project_path.is_dir():
+        fail(f"project path does not exist: {project_path}")
+    project = {
+        "id": args.project_id,
+        "aliases": args.alias,
+        "path": os.path.relpath(project_path, WORKSPACE),
+        "domain": args.domain,
+        "status": "active",
+        "team": args.team,
+        "repos": [],
+    }
+    projects.append(project)
+elif args.alias or args.project_path:
+    fail("aliases and project path can only be set when creating a project")
+
+project["repos"].append(
+    {
+        "id": args.repo_id,
+        "path": relative_repo,
+        "role": args.role,
+        "guide": args.guide,
+        "graph": args.graph,
+        "sync": False,
+        "repoLocalAi": (repo_path / ".claude").is_dir(),
+        "present": True,
+    }
+)
+
+temporary = registry_path.with_suffix(".yaml.tmp")
+temporary.write_text(json.dumps(registry, indent=2) + "\n")
+temporary.replace(registry_path)
+
+today = dt.date.today().isoformat()
+project_memory = WORKSPACE / "memory/20-projects" / args.project_id
+task_memory = WORKSPACE / "memory/30-tasks" / args.project_id
+project_memory.mkdir(parents=True, exist_ok=True)
+task_memory.mkdir(parents=True, exist_ok=True)
+note = project_memory / "project.md"
+repo_ids = [row["id"] for row in project["repos"]]
+repo_lines = "\n".join(f"  - {repo_id}" for repo_id in repo_ids)
+if note.exists():
+    content = note.read_text()
+    content = re.sub(r"^repos:(?: \[\])?\n(?:  - .*\n)*", f"repos:\n{repo_lines}\n", content, count=1, flags=re.MULTILINE)
+    content = re.sub(r"^updated: .*?$", f"updated: {today}", content, count=1, flags=re.MULTILINE)
+    note.write_text(content)
+else:
+    note.write_text(
+        f"""---
+name: {args.project_id}-project
+description: Registered local project {args.project_id}
+metadata:
+  type: project
+type: project
+domain: {args.project_id}
+repos:
+{repo_lines}
+status: active
+verified: true
+updated: {today}
+sources:
+  - workspace.yaml
+---
+
+# {args.project_id}
+
+Registered repositories are listed in the frontmatter. Replace this line with verified project facts.
+"""
+    )
+
+print(f"registered {args.repo_id} in project {args.project_id}", flush=True)
+if not (repo_path / args.guide).is_file():
+    print(f"WARN missing repository guide: {repo_path / args.guide}", flush=True)
+
+scripts = ["obsidian-refresh"]
+if shutil.which("qmd") is not None:
+    scripts = ["memory-configure", "memory-index", *scripts]
+else:
+    print("WARN QMD is unavailable; run memory-configure and memory-index after installing it")
+for script in scripts:
+    result = subprocess.run([str(WORKSPACE / "scripts" / script)], cwd=WORKSPACE, check=False)
+    if result.returncode:
+        raise SystemExit(result.returncode)

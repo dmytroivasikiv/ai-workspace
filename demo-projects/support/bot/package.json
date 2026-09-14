@@ -1,0 +1,8 @@
+{
+  "name": "demo-support-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

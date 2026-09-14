@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Validate durable Markdown notes without loading their bodies into context."""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+from pathlib import Path
+from workspace_lib import WORKSPACE
+
+MEMORY = WORKSPACE / "memory"
+REQUIRED = ("type", "domain", "repos", "status", "verified", "updated", "sources")
+STATUSES = {"active", "proposed", "deprecated", "superseded", "resolved"}
+SKIP_TOP = {"30-tasks", "90-inbox", "99-templates", "bases", ".obsidian"}
+SKIP_FILES = {"Home.md", "MEMORY.md"}
+
+
+def metadata(path: Path) -> dict[str, object]:
+    lines = path.read_text(errors="replace").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    result: dict[str, object] = {}
+    active_list: str | None = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        item = re.match(r"^\s+-\s+(.+?)\s*$", line)
+        if item and active_list:
+            value = result.setdefault(active_list, [])
+            if isinstance(value, list):
+                value.append(item.group(1).strip("'\""))
+            continue
+        field = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$", line)
+        if not field:
+            continue
+        key, raw = field.groups()
+        if raw == "[]":
+            result[key], active_list = [], None
+        elif raw:
+            normalized = raw.strip("'\"")
+            result[key] = normalized
+            active_list = None
+        else:
+            result[key], active_list = [], key
+    return result
+
+
+failures: list[str] = []
+checked = 0
+for path in sorted(MEMORY.rglob("*.md")):
+    relative = path.relative_to(MEMORY)
+    if path.name in SKIP_FILES or relative.parts[0] in SKIP_TOP:
+        continue
+    checked += 1
+    data = metadata(path)
+    label = f"memory/{relative}"
+    if not data:
+        failures.append(f"{label}: missing YAML frontmatter")
+        continue
+    missing = [key for key in REQUIRED if key not in data or data[key] == ""]
+    if missing:
+        failures.append(f"{label}: missing {', '.join(missing)}")
+    if data.get("status") not in STATUSES:
+        failures.append(f"{label}: invalid status {data.get('status')!r}")
+    if str(data.get("verified", "")).lower() not in {"true", "false"}:
+        failures.append(f"{label}: verified must be true or false")
+    try:
+        dt.date.fromisoformat(str(data.get("updated", "")))
+    except ValueError:
+        failures.append(f"{label}: updated must be YYYY-MM-DD")
+    if not isinstance(data.get("repos"), list):
+        failures.append(f"{label}: repos must be a YAML list")
+    if not isinstance(data.get("sources"), list) or not data.get("sources"):
+        failures.append(f"{label}: sources must be a non-empty YAML list")
+
+for failure in failures:
+    print(f"FAIL {failure}")
+if failures:
+    raise SystemExit(1)
+print(f"OK   durable memory ({checked} note(s))")

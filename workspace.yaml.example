@@ -1,0 +1,60 @@
+{
+  "schema": 3,
+  "note": "JSON-compatible YAML. Keep local paths in workspace.yaml, which is ignored by Git.",
+  "projects": [
+    {
+      "id": "shop",
+      "aliases": [
+        "store"
+      ],
+      "path": "demo-projects/shop",
+      "domain": "commerce-demo",
+      "status": "active",
+      "team": true,
+      "repos": [
+        {
+          "id": "shop-api",
+          "path": "demo-projects/shop/api",
+          "role": "Order API",
+          "guide": "AGENTS.md",
+          "graph": "on-demand",
+          "sync": false,
+          "repoLocalAi": true,
+          "present": true
+        },
+        {
+          "id": "shop-web",
+          "path": "demo-projects/shop/web",
+          "role": "Storefront",
+          "guide": "AGENTS.md",
+          "graph": "on-demand",
+          "sync": false,
+          "repoLocalAi": false,
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "support",
+      "aliases": [
+        "helpdesk"
+      ],
+      "path": "demo-projects/support",
+      "domain": "support-demo",
+      "status": "active",
+      "team": true,
+      "repos": [
+        {
+          "id": "support-bot",
+          "path": "demo-projects/support/bot",
+          "role": "Support automation",
+          "guide": "AGENTS.md",
+          "graph": "on-demand",
+          "sync": false,
+          "repoLocalAi": false,
+          "present": true
+        }
+      ]
+    }
+  ]
+}

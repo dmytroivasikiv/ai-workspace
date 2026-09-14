@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Create isolated QMD collections inside a workspace-local index."""
+
+from pathlib import Path
+from workspace_lib import WORKSPACE, projects, qmd
+
+collections = [
+    ("global-profile", WORKSPACE / "memory/00-profile", "Stable user preferences and global AI operating rules; no project technical facts."),
+    ("global-workspace", WORKSPACE / "memory/10-workspace", "Verified architecture and terminology of the personal AI control plane."),
+    ("global-colleagues", WORKSPACE / "memory/15-colleagues", "Minimal verified profiles of human members of the company Slack general channel."),
+    ("global-patterns", WORKSPACE / "memory/40-patterns", "Reusable cross-project AI workflow and context-management patterns."),
+]
+project_rows = projects()
+for project in project_rows:
+    collections.extend(
+        [
+            (f"project-{project['id']}", WORKSPACE / "memory/20-projects" / project["id"], f"Verified technical knowledge scoped only to logical project {project['id']}."),
+            (f"tasks-{project['id']}", WORKSPACE / "memory/30-tasks" / project["id"], f"Temporary task anchors and review continuity scoped only to project {project['id']}."),
+        ]
+    )
+
+failures = 0
+for name in [f"colleagues-{project['id']}" for project in project_rows]:
+    current = qmd("collection", "show", name)
+    if current.returncode:
+        continue
+    removed = qmd("collection", "remove", name, "--yes")
+    if removed.returncode:
+        removed = qmd("collection", "rm", name, "--yes")
+    if removed.returncode:
+        failures += 1
+        print(f"FAIL remove legacy {name}: {(removed.stderr or removed.stdout).strip().splitlines()[-1]}")
+    else:
+        print(f"remove legacy {name}")
+
+for name, path, description in collections:
+    path.mkdir(parents=True, exist_ok=True)
+    current = qmd("collection", "show", name)
+    stale = current.returncode == 0 and str(path) not in current.stdout
+    if stale:
+        removed = qmd("collection", "remove", name, "--yes")
+        if removed.returncode:
+            removed = qmd("collection", "rm", name, "--yes")
+        print(f"move {name} -> {path}")
+    if current.returncode == 0 and not stale:
+        print(f"ok   {name}")
+    else:
+        result = qmd("collection", "add", str(path), "--name", name, "--mask", "**/*.md")
+        if result.returncode:
+            failures += 1
+            print(f"FAIL {name}: {(result.stderr or result.stdout).strip().splitlines()[-1]}")
+        else:
+            print(f"add  {name}")
+    context = qmd("context", "add", f"qmd://{name}/", description)
+    if context.returncode:
+        failures += 1
+        print(f"FAIL context {name}: {(context.stderr or context.stdout).strip().splitlines()[-1]}")
+raise SystemExit(min(failures, 125))

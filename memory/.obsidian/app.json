@@ -1,0 +1,8 @@
+{
+  "alwaysUpdateLinks": true,
+  "attachmentFolderPath": "90-inbox/attachments",
+  "newFileLocation": "folder",
+  "newFileFolderPath": "90-inbox",
+  "showLineNumber": true,
+  "useMarkdownLinks": true
+}

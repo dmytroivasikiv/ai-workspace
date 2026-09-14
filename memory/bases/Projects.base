@@ -1,0 +1,13 @@
+filters:
+  and:
+    - file.inFolder("20-projects")
+views:
+  - type: table
+    name: Projects
+    order:
+      - file.name
+      - domain
+      - repos
+      - status
+      - updated
+      - sources

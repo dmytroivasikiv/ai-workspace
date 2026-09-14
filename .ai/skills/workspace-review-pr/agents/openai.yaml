@@ -1,0 +1,6 @@
+interface:
+  display_name: "Review with Continuity"
+  short_description: "Deduplicate semantic review findings across passes"
+  default_prompt: "Use $workspace-review-pr to review this change with prior finding continuity."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Build and query one repository-scoped Graphify graph with freshness checks."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from workspace_lib import WORKSPACE, atomic_json, git, repo, run
+
+
+def usage() -> int:
+    print("Usage: scripts/code-graph {status|build|refresh|query|explain|path|affected|hubs|tree|callflow|visualize|open} <repo-id> [args]", file=sys.stderr)
+    return 64
+
+
+if len(sys.argv) < 3:
+    raise SystemExit(usage())
+command, repo_id, *arguments = sys.argv[1:]
+project_row, repo_row = repo(repo_id)
+if repo_row.get("graph") == "disabled":
+    print(f"graph disabled for {repo_id}", file=sys.stderr)
+    raise SystemExit(2)
+root = Path(repo_row["path"])
+output = WORKSPACE / ".graphify" / project_row["id"] / repo_id
+graph = output / "graphify-out/graph.json"
+state = output / "state.json"
+
+
+def digest_command(digest: "hashlib._Hash", args: list[str]) -> None:
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert process.stdout is not None
+    while chunk := process.stdout.read(1024 * 1024):
+        digest.update(chunk)
+    process.wait()
+
+
+def source_state() -> dict[str, str]:
+    digest = hashlib.sha256()
+    head = git(root, "rev-parse", "HEAD").stdout.strip() or "unborn"
+    digest.update(head.encode())
+    digest_command(digest, ["git", "-C", str(root), "diff", "--binary", "--no-ext-diff"])
+    digest_command(digest, ["git", "-C", str(root), "diff", "--cached", "--binary", "--no-ext-diff"])
+    untracked = git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+    for relative in sorted(untracked):
+        path = root / relative
+        if not path.is_file() or any(part in {"node_modules", ".next", "dist", "coverage", ".cache", "graphify-out"} for part in Path(relative).parts):
+            continue
+        stat = path.stat()
+        digest.update(relative.encode() + b"\0")
+        if stat.st_size <= 1024 * 1024:
+            digest.update(path.read_bytes())
+        else:
+            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return {"git_head": head, "working_tree_hash": digest.hexdigest()}
+
+
+def graph_status(verbose: bool = True) -> int:
+    if not graph.is_file() or not state.is_file():
+        if verbose:
+            print(f"{repo_id}: missing ({repo_row['graph']})")
+        return 2
+    try:
+        graph_data = json.loads(graph.read_text())
+        if not graph_data.get("nodes"):
+            if verbose:
+                print(f"{repo_id}: invalid (Graphify produced zero nodes)")
+            return 4
+    except (OSError, json.JSONDecodeError):
+        if verbose:
+            print(f"{repo_id}: invalid graph JSON")
+        return 4
+    recorded = json.loads(state.read_text())
+    current = source_state()
+    if recorded.get("git_head") != current["git_head"] or recorded.get("working_tree_hash") != current["working_tree_hash"]:
+        if verbose:
+            print(f"{repo_id}: stale; refresh before relying on graph output")
+        return 3
+    if verbose:
+        print(f"{repo_id}: fresh; built {recorded.get('built_at', 'unknown')}")
+    return 0
+
+
+def build() -> int:
+    output.mkdir(parents=True, exist_ok=True)
+    source_cache = root / "graphify-out"
+    hosted_cache = output / "source-cache"
+    temporary_cache_link = not source_cache.exists()
+    if temporary_cache_link:
+        hosted_cache.mkdir(parents=True, exist_ok=True)
+        source_cache.symlink_to(hosted_cache, target_is_directory=True)
+    environment = {**os.environ, "GRAPHIFY_QUERY_LOG_DISABLE": "1"}
+    try:
+        result = subprocess.run(
+            ["graphify", "extract", str(root), "--code-only", "--no-cluster", "--force", "--max-workers", "4", "--out", str(output)],
+            cwd=WORKSPACE, env=environment, check=False,
+        )
+    finally:
+        if temporary_cache_link and source_cache.is_symlink():
+            source_cache.unlink()
+    valid_graph = False
+    if graph.is_file():
+        try:
+            valid_graph = bool(json.loads(graph.read_text()).get("nodes"))
+        except (OSError, json.JSONDecodeError):
+            valid_graph = False
+    if result.returncode == 0 and valid_graph:
+        current = source_state()
+        atomic_json(state, {"schema": 1, **current, "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    elif result.returncode == 0:
+        state.unlink(missing_ok=True)
+        print(f"ERROR Graphify returned success but produced no usable nodes at {graph}", file=sys.stderr)
+        return 1
+    return result.returncode
+
+
+if command == "status":
+    raise SystemExit(graph_status())
+if command in {"build", "refresh"}:
+    raise SystemExit(build())
+if graph_status(False):
+    print(f"ERROR {repo_id} graph is missing or stale; run refresh or use direct source search", file=sys.stderr)
+    raise SystemExit(3)
+
+environment = {**os.environ, "GRAPHIFY_QUERY_LOG_DISABLE": "1"}
+if command == "query":
+    if not arguments:
+        raise SystemExit(usage())
+    graph_command = ["graphify", "query", " ".join(arguments), "--budget", "1200", "--graph", str(graph)]
+elif command in {"explain", "affected", "path"}:
+    graph_command = ["graphify", command, *arguments, "--graph", str(graph)]
+elif command == "hubs":
+    graph_command = ["graphify", "god-nodes", "--top", "12", "--graph", str(graph)]
+elif command == "tree":
+    artifact = output / "GRAPH_TREE.html"
+    graph_command = ["graphify", "tree", "--graph", str(graph), "--output", str(artifact), "--root", str(root), "--label", repo_id]
+elif command == "callflow":
+    artifact = output / "CALLFLOW.html"
+    graph_command = ["graphify", "export", "callflow-html", "--graph", str(graph), "--output", str(artifact)]
+elif command in {"visualize", "open"}:
+    candidates = [output / "graphify-out/graph.html", output / "GRAPH_TREE.html", output / "CALLFLOW.html"]
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        print("no HTML graph artifact; run tree or callflow", file=sys.stderr)
+        raise SystemExit(2)
+    print(existing[0])
+    raise SystemExit(0)
+else:
+    raise SystemExit(usage())
+
+raise SystemExit(subprocess.run(graph_command, cwd=WORKSPACE, env=environment, check=False).returncode)

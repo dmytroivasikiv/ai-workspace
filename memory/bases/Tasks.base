@@ -1,0 +1,9 @@
+filters:
+  and:
+    - file.inFolder("30-tasks")
+views:
+  - type: table
+    name: Task anchors
+    order:
+      - file.name
+      - file.mtime

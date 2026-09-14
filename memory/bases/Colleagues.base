@@ -1,0 +1,15 @@
+filters:
+  and:
+    - file.inFolder("15-colleagues")
+    - verified == true
+views:
+  - type: table
+    name: Colleagues
+    groupBy:
+      property: role
+      direction: ASC
+    order:
+      - file.name
+      - description
+      - role
+      - updated

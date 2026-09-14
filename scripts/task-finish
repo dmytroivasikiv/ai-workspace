@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Show compact final Git evidence for one repository."""
+
+import sys
+from pathlib import Path
+from workspace_lib import git, repo
+
+if len(sys.argv) != 2:
+    print("Usage: scripts/task-finish <repository-id>", file=sys.stderr)
+    raise SystemExit(64)
+
+project, row = repo(sys.argv[1])
+root = Path(row["path"])
+print(f"Primary project: {project['id']}")
+print(f"Repository: {row['id']} ({root})")
+status = git(root, "status", "--short").stdout.splitlines()
+print("Git status (maximum 40 entries):")
+for line in status[:40]:
+    print(line)
+if len(status) > 40:
+    print(f"... {len(status) - 40} more entries omitted")
+print("Unstaged diff stat:")
+print(git(root, "diff", "--stat").stdout.strip() or "(none)")
+print("Staged diff stat:")
+print(git(root, "diff", "--cached", "--stat").stdout.strip() or "(none)")
+print("Checklist: inspect final diff; preserve unrelated work; run risk-proportional checks; report skipped checks and residual risk.")

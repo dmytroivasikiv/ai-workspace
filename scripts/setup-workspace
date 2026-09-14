@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Prepare a cloned AI workspace without installing project dependencies."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+from pathlib import Path
+
+from workspace_lib import WORKSPACE
+
+
+def run_step(label: str, *command: str) -> None:
+    print(f"\n== {label} ==", flush=True)
+    result = subprocess.run(command, cwd=WORKSPACE, check=False)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--user-adapters", action="store_true")
+    parser.add_argument("--semantic", action="store_true")
+    args = parser.parse_args()
+
+    registry = WORKSPACE / "workspace.yaml"
+    example = WORKSPACE / "workspace.yaml.example"
+    if not registry.exists():
+        if not example.is_file():
+            raise SystemExit("ERROR workspace.yaml.example is missing")
+        shutil.copy2(example, registry)
+        print(f"create {registry}")
+    else:
+        print(f"keep   {registry}")
+
+    missing = []
+    if shutil.which("qmd") is None:
+        missing.append("QMD: npm install -g @tobilu/qmd@2.5.3")
+    if missing:
+        print("\nInstall the required tool, then rerun setup:")
+        for item in missing:
+            print(f"- {item}")
+        return 2
+
+    bootstrap = [str(WORKSPACE / "scripts/bootstrap-ai")]
+    if args.user_adapters:
+        bootstrap.append("--user-adapters")
+    run_step("Shared skills and adapters", *bootstrap)
+    run_step("Memory collections", str(WORKSPACE / "scripts/memory-configure"))
+    run_step("Memory index", str(WORKSPACE / "scripts/memory-index"))
+    if args.semantic:
+        run_step("Semantic memory check", str(WORKSPACE / "scripts/memory-semantic-check"))
+    run_step("Obsidian canvas", str(WORKSPACE / "scripts/obsidian-refresh"))
+    run_step("Portable checks", str(WORKSPACE / "scripts/ci-check"))
+
+    print("\nWorkspace is ready.")
+    print("- Run: ./bin/aiw demo")
+    print("- Add a project: ./bin/aiw add-project --help")
+    if not args.user_adapters:
+        print("- Enable cwd-independent Claude/Codex rules and Claude hooks once per machine:")
+        print("  ./bin/aiw setup --user-adapters")
+    if shutil.which("graphify") is None:
+        print("- Optional Graphify: install uv, then run uv tool install graphifyy==0.9.27")
+    if shutil.which("obsidian") is None and not Path("/Applications/Obsidian.app").exists():
+        print("- Optional Obsidian: install the desktop app and open the memory/ folder as a vault")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

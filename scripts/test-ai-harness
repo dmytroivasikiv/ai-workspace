@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""End-to-end smoke tests for syntax, hooks, memory, QMD, review, and graph wrappers."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from workspace_lib import WORKSPACE, projects
+
+failures = 0
+
+
+def test(condition: bool, message: str) -> None:
+    global failures
+    print(("OK   " if condition else "FAIL ") + message)
+    failures += int(not condition)
+
+
+python_files = [*WORKSPACE.glob("scripts/*")]
+shell = subprocess.run(["bash", "-n", str(WORKSPACE / "bin/aiw")], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+test(shell.returncode == 0, "shell syntax bin/aiw")
+for path in python_files:
+    if path.suffix == ".py" or (path.is_file() and path.read_bytes().startswith(b"#!/usr/bin/env python3")):
+        result = subprocess.run(["python3", "-m", "py_compile", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        test(result.returncode == 0, f"Python syntax {path.name}")
+for path in WORKSPACE.glob("scripts/*.mjs"):
+    result = subprocess.run(["node", "--check", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    test(result.returncode == 0, f"Node syntax {path.name}")
+for path in [WORKSPACE / "workspace.yaml", WORKSPACE / ".claude/settings.json", WORKSPACE / "memory/Portfolio.canvas", *WORKSPACE.glob("memory/.obsidian/*.json")]:
+    try:
+        json.loads(path.read_text())
+        test(True, f"JSON {path.relative_to(WORKSPACE)}")
+    except Exception:
+        test(False, f"JSON {path.relative_to(WORKSPACE)}")
+
+lint = subprocess.run([str(WORKSPACE / "scripts/memory-lint")], cwd=WORKSPACE, check=False, stdout=subprocess.PIPE)
+test(lint.returncode == 0, "memory lint")
+
+registry = projects()
+sample = next((row for row in registry if row.get("repos")), registry[0])
+multi = next((row for row in registry if len(row.get("repos", [])) > 1), sample)
+
+context = subprocess.run([str(WORKSPACE / "scripts/task-context"), sample["id"], "build scripts"], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE, timeout=120)
+test(context.returncode == 0, "task-context is optional and executable")
+test("not a permission gate" in context.stdout and len(context.stdout.splitlines()) <= 72, "task-context bounded non-gating output")
+multi_context = subprocess.run([str(WORKSPACE / "scripts/task-context"), multi["id"], "controls"], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE, timeout=120)
+test(
+    multi_context.returncode == 0 and all(repo["id"] in multi_context.stdout for repo in multi.get("repos", [])),
+    "a multi-repository project resolves as one logical project",
+)
+test(
+    "Team standards" not in multi_context.stdout or "inert from this cwd" in multi_context.stdout,
+    "task-context reports repo-local standards that the current cwd cannot load",
+)
+
+settings_text = (WORKSPACE / ".claude/settings.json").read_text()
+for forbidden in ("PreToolUse", "PostToolUse", "PostToolBatch", '"Stop"', "skillOverrides", "effortLevel", "CLAUDE_CODE_EFFORT_LEVEL"):
+    test(forbidden not in settings_text, f"hook settings omit {forbidden}")
+test("hooks" not in json.loads(settings_text), "project settings do not duplicate user-level hooks")
+
+installer = WORKSPACE / "scripts/install-user-adapters"
+with tempfile.TemporaryDirectory() as adapter_home_value:
+    adapter_home = Path(adapter_home_value)
+    (adapter_home / ".claude").mkdir(parents=True)
+    (adapter_home / ".codex").mkdir(parents=True)
+    (adapter_home / ".claude/settings.json").write_text(json.dumps({"theme": "dark"}))
+    (adapter_home / ".claude/CLAUDE.md").write_text("# Existing Claude rules\n")
+    (adapter_home / ".codex/AGENTS.md").write_text("# Existing Codex rules\n")
+    installed = subprocess.run(
+        [str(installer), "--apply", "--home", str(adapter_home)], cwd=WORKSPACE,
+        check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    installed_settings = json.loads((adapter_home / ".claude/settings.json").read_text())
+    test(installed.returncode == 0, "user adapter installer")
+    test(installed_settings.get("theme") == "dark", "user adapter installer preserves settings")
+    test(installed_settings.get("outputStyle") == "Concise", "user adapter installer selects concise output style")
+    concise_style = adapter_home / ".claude/output-styles/concise.md"
+    test(concise_style.is_file() and "keep-coding-instructions: true" in concise_style.read_text(), "concise output style keeps coding instructions")
+    test(set(installed_settings.get("hooks", {})) == {"SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "InstructionsLoaded", "SessionEnd"}, "user adapter installer adds advisory hooks")
+    test("$CLAUDE_PROJECT_DIR" not in json.dumps(installed_settings), "installed hooks are cwd-independent")
+    claude_rules = (adapter_home / ".claude/CLAUDE.md").read_text()
+    codex_rules = (adapter_home / ".codex/AGENTS.md").read_text()
+    test("# Existing Claude rules" in claude_rules and "<!-- ai-workspace-managed -->" in claude_rules, "Claude adapter preserves existing rules")
+    test("# Existing Codex rules" in codex_rules and "<!-- ai-workspace-managed -->" in codex_rules, "Codex adapter preserves existing rules")
+    helper_names = {
+        "aiw-claude-workflow-audit": "claude-workflow-audit.mjs",
+        "aiw-code-graph": "code-graph",
+        "aiw-codex-workflow-audit": "codex-workflow-audit.mjs",
+        "aiw-memory-index": "memory-index",
+        "aiw-memory-lint": "memory-lint",
+        "aiw-memory-search": "memory-search",
+        "aiw-pr-review-context": "pr-review-context.mjs",
+        "aiw-task-context": "task-context",
+        "aiw-task-finish": "task-finish",
+    }
+    for name, target in helper_names.items():
+        helper = adapter_home / ".local/bin" / name
+        test(helper.is_symlink() and helper.resolve() == (WORKSPACE / "scripts" / target).resolve(), f"cwd-independent helper {name}")
+
+hook = WORKSPACE / "scripts/claude-hook.mjs"
+session = str(uuid.uuid4())
+state = WORKSPACE / ".ai/state/claude" / f"{session}.json"
+archives: list[Path] = []
+with tempfile.TemporaryDirectory() as directory:
+    transcript = Path(directory) / "transcript.jsonl"
+    transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": 1000}}}) + "\n")
+
+    def event(name: str, **extra: object) -> subprocess.CompletedProcess[str]:
+        payload = {"session_id": session, "hook_event_name": name, "cwd": str(WORKSPACE), "transcript_path": str(transcript), **extra}
+        return subprocess.run(["node", str(hook)], input=json.dumps(payload), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+    start = event("SessionStart", source="startup")
+    test(start.returncode == 0 and start.stdout == "", "SessionStart is silent")
+    small = event("UserPromptSubmit")
+    test(
+        "Context note" not in small.stdout
+        and "Context quality checkpoint" not in small.stdout
+        and '"decision"' not in small.stdout
+        and "permissionDecision" not in small.stdout,
+        "small UserPromptSubmit emits no context warning and no blocking decision",
+    )
+    transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": 225000}}}) + "\n")
+    warning = event("UserPromptSubmit")
+    test("Context note" in warning.stdout and '"decision"' not in warning.stdout and "permissionDecision" not in warning.stdout, "large context emits non-blocking advisory")
+    repeated = event("UserPromptSubmit")
+    test(repeated.stdout == "", "advisory is not repeated")
+    pre = event("PreCompact", trigger="manual")
+    test(pre.stdout == "", "PreCompact is silent and non-blocking")
+    post = event("PostCompact", trigger="manual", compact_summary="compact test summary")
+    test(post.stdout == "", "PostCompact stores without model output")
+    archives = list((WORKSPACE / ".ai/state/claude").glob(f"{session}-compact-*.json"))
+    test(bool(archives) and "compact test summary" in archives[0].read_text(), "PostCompact archive exists")
+    compact_resume = event("SessionStart", source="compact")
+    compact_state = json.loads(state.read_text())
+    test(compact_resume.stdout == "" and compact_state.get("compactions") == 1, "compact lifecycle is counted once")
+    instruction = event("InstructionsLoaded", file_path=str(WORKSPACE / "AGENTS.md"), load_reason="session_start")
+    test(instruction.stdout == "", "InstructionsLoaded is silent")
+    end = event("SessionEnd", reason="other")
+    test(end.stdout == "", "SessionEnd is silent")
+
+with tempfile.TemporaryDirectory() as directory:
+    ladder_session = str(uuid.uuid4())
+    ladder_state = WORKSPACE / ".ai/state/claude" / f"{ladder_session}.json"
+    ladder_transcript = Path(directory) / "ladder.jsonl"
+
+    def ladder(context: int) -> subprocess.CompletedProcess[str]:
+        ladder_transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": context}}}) + "\n")
+        payload = {
+            "session_id": ladder_session, "hook_event_name": "UserPromptSubmit",
+            "cwd": str(WORKSPACE), "transcript_path": str(ladder_transcript), "prompt": "unrelated words",
+        }
+        return subprocess.run(["node", str(hook)], input=json.dumps(payload), text=True, stdout=subprocess.PIPE, check=False)
+
+    test(ladder(90_000).stdout.count("Context") == 0, "no context advisory below the first threshold")
+    first = ladder(130_000)
+    test("Context note" in first.stdout, "first advisory fires while a handoff is still cheap")
+    test(ladder(150_000).stdout == "", "first advisory is not repeated")
+    second = ladder(250_000)
+    test("Context checkpoint" in second.stdout, "second advisory escalates to an explicit handoff")
+    third = ladder(340_000)
+    test("Context drift" in third.stdout, "third advisory warns about stale conclusions")
+    test(
+        all('"decision"' not in r.stdout and "permissionDecision" not in r.stdout for r in (first, second, third)),
+        "no context advisory carries a blocking decision",
+    )
+    ladder_state.unlink(missing_ok=True)
+
+memory_session = str(uuid.uuid4())
+memory_state = WORKSPACE / ".ai/state/claude" / f"{memory_session}.json"
+memory_probe = subprocess.run(
+    ["node", str(hook)],
+    input=json.dumps({
+        "session_id": memory_session, "hook_event_name": "UserPromptSubmit", "cwd": str(WORKSPACE),
+        "prompt": f"{sample['id']} check the recorded project note",
+    }),
+    text=True, stdout=subprocess.PIPE, check=False,
+)
+test(memory_probe.returncode == 0, "project card renders with memory lookup enabled")
+test(len(memory_probe.stdout) <= 4000, f"project card stays bounded ({len(memory_probe.stdout)} chars)")
+hit_lines = [line for line in memory_probe.stdout.splitlines() if line.startswith("  - ") and ".md)" in line]
+test(len(hit_lines) <= 3, "project card surfaces at most three memory hits")
+memory_state.unlink(missing_ok=True)
+
+index_text = (WORKSPACE / "memory/MEMORY.md").read_text()
+project_notes = len(list((WORKSPACE / "memory/20-projects").rglob("*.md")))
+test(
+    index_text.count("\n- ") <= 12 + len(registry) and project_notes > 0,
+    "memory index summarises projects instead of listing every note",
+)
+
+scope_states: list[Path] = []
+scope_roots = []
+for row in registry:
+    project_root = WORKSPACE / row["path"]
+    if not project_root.is_dir():
+        continue
+    scope_roots.append(project_root)
+    for repo in row.get("repos", []):
+        repo_root = WORKSPACE / repo["path"]
+        if not repo_root.is_dir():
+            continue
+        scope_roots.append(repo_root)
+        nested = next((child for child in sorted(repo_root.iterdir()) if child.is_dir() and not child.name.startswith(".")), None)
+        if nested:
+            scope_roots.append(nested)
+        break
+    if len(scope_roots) >= 6:
+        break
+with tempfile.TemporaryDirectory() as directory:
+    transcript = Path(directory) / "scope.jsonl"
+    transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": 1000}}}) + "\n")
+    for cwd in scope_roots:
+        scope_session = str(uuid.uuid4())
+        payload = {
+            "session_id": scope_session,
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "cwd": str(cwd),
+            "transcript_path": str(transcript),
+        }
+        result = subprocess.run(
+            ["node", str(hook)], input=json.dumps(payload), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        scope_state = WORKSPACE / ".ai/state/claude" / f"{scope_session}.json"
+        scope_states.append(scope_state)
+        recorded = json.loads(scope_state.read_text()) if scope_state.exists() else {}
+        test(result.returncode == 0 and recorded.get("cwd") == str(cwd), f"cwd-independent hook at {cwd.name}")
+
+search = subprocess.run([str(WORKSPACE / "scripts/memory-search"), sample["id"], "Independent logical projects"], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+test(search.returncode == 0 and ("project" in search.stdout.lower() or "workspace" in search.stdout.lower()), "QMD lexical search returns known memory")
+
+semantic_marker = WORKSPACE / ".ai/state/qmd-semantic-disabled"
+marker_existed = semantic_marker.exists()
+marker_value = semantic_marker.read_text() if marker_existed else ""
+semantic_marker.parent.mkdir(parents=True, exist_ok=True)
+semantic_marker.write_text("smoke-test\n")
+review_project = sample["id"]
+try:
+    started = time.monotonic()
+    semantic = subprocess.run([str(WORKSPACE / "scripts/memory-search"), "--semantic", review_project, "Independent logical projects"], cwd=WORKSPACE, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    test(semantic.returncode == 0 and time.monotonic() - started < 10, "semantic circuit breaker falls back quickly")
+finally:
+    if marker_existed:
+        semantic_marker.write_text(marker_value)
+    else:
+        semantic_marker.unlink(missing_ok=True)
+
+review_key = f"smoke-{session[:8]}"
+review = WORKSPACE / "scripts/pr-review-context.mjs"
+record = subprocess.run(["node", str(review), "record", review_project, review_key, "src/example.ts", "example", "returns stale data after update", "reported"], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE)
+finding_id = json.loads(record.stdout)["id"] if record.returncode == 0 else ""
+collect = subprocess.run(["node", str(review), "collect", review_project, review_key], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE)
+test(record.returncode == 0 and finding_id in collect.stdout and len(collect.stdout) <= 20000, "review ledger records and returns bounded local context")
+review_state = WORKSPACE / ".ai/state/reviews" / f"{review_project}--{review_key}.json"
+review_mirror = WORKSPACE / "memory/30-tasks" / review_project / f"review-{review_project}-{review_key}.md"
+review_state.unlink(missing_ok=True)
+review_mirror.unlink(missing_ok=True)
+
+sys.path.insert(0, str(WORKSPACE / "scripts"))
+from workspace_lib import nested_guides, repo_standards  # noqa: E402
+
+with tempfile.TemporaryDirectory() as directory:
+    fixture = Path(directory)
+    for relative, name in (("packages/api", "AGENTS.md"), ("packages/web", "CLAUDE.md"), ("services/worker", "AGENTS.md")):
+        (fixture / relative).mkdir(parents=True)
+        (fixture / relative / name).write_text("# guide\n")
+    (fixture / "node_modules/junk").mkdir(parents=True)
+    (fixture / "node_modules/junk/AGENTS.md").write_text("# ignored\n")
+    for index in range(50):
+        (fixture / "src" / f"mod{index}").mkdir(parents=True)
+        (fixture / "src" / f"mod{index}" / "AGENTS.md").write_text("# ignored\n")
+    discovered = sorted(nested_guides(fixture))
+    test(
+        discovered == ["packages/api/AGENTS.md", "packages/web/CLAUDE.md", "services/worker/AGENTS.md"],
+        "nested guide discovery finds package layouts and skips noise and wide trees",
+    )
+    (fixture / ".claude/skills/one").mkdir(parents=True)
+    (fixture / "AGENTS.md").write_text("# root\n")
+    standards = repo_standards(fixture)
+    test(
+        "AGENTS.md" in standards and ".claude/skills(1)" in standards,
+        "repo standards report guides and repo-local Claude payloads",
+    )
+
+graph = subprocess.run([str(WORKSPACE / "scripts/code-graph"), "status", sample["repos"][0]["id"]], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE)
+test(graph.returncode in {0, 2, 3, 4} and len(graph.stdout) < 1000, "graph status is bounded and honest")
+
+state.unlink(missing_ok=True)
+for archive in archives:
+    archive.unlink(missing_ok=True)
+for scope_state in scope_states:
+    scope_state.unlink(missing_ok=True)
+print(f"SUMMARY {failures} failure(s)")
+raise SystemExit(min(failures, 125))

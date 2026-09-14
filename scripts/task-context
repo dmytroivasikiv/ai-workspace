@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Produce a bounded, advisory startup packet for one logical project."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from workspace_lib import WORKSPACE, git_state, project, repo_standards, resolve
+
+if len(sys.argv) < 3:
+    print("Usage: scripts/task-context <project-id> <short search terms>", file=sys.stderr)
+    raise SystemExit(64)
+
+project_id = sys.argv[1]
+terms = " ".join(sys.argv[2:]).strip()
+if len(terms.encode()) > 240:
+    print("ERROR search terms must be at most 240 bytes", file=sys.stderr)
+    raise SystemExit(64)
+
+row = project(project_id)
+project_id = row["id"]
+cwd = Path.cwd().resolve()
+
+print(f"Project: {row['id']} ({row['domain']})")
+print(f"Path: {row['path']}")
+print(f"Task terms: {terms}")
+print("Repositories:")
+for repo in row.get("repos", []):
+    path = resolve(repo["path"])
+    branch, state = git_state(path) if path.exists() else ("-", "missing")
+    print(f"- {repo['id']}: {branch}, {state}; guide={repo['guide']}; graph={repo['graph']}")
+
+if row.get("team"):
+    inside = None
+    for repo in row.get("repos", []):
+        path = resolve(repo["path"])
+        if cwd == path or path in cwd.parents:
+            inside = repo["id"]
+    print("Team standards:")
+    for repo in row.get("repos", []):
+        found = repo_standards(resolve(repo["path"]))
+        if found:
+            active = "active" if inside == repo["id"] else "inert from this cwd"
+            print(f"- {repo['id']}: {', '.join(found)} [{active}]")
+    if inside is None:
+        print("- session started outside every repository: repo-local .claude/ skills, agents and")
+        print("  hooks are not loaded. Read the listed guides directly, or restart inside the repo.")
+
+search = subprocess.run(
+    [str(WORKSPACE / "scripts/memory-search"), project_id, terms],
+    cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE, timeout=30,
+)
+print("Memory (maximum 3 lexical hits):")
+print(search.stdout.strip() or "- no matching memory")
+if search.returncode not in {0, 1} and search.stderr.strip():
+    print(f"- memory unavailable: {search.stderr.strip().splitlines()[-1]}")
+print("Suggested next: choose one primary repo, read its guide, inspect exact symbols and nearby tests.")
+print("This packet is guidance, not a permission gate or context ceiling, and is optional for trivial tasks.")

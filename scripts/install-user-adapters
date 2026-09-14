@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Install cwd-independent Claude and Codex adapters without replacing user config."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+from workspace_lib import WORKSPACE
+
+
+EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreCompact",
+    "PostCompact",
+    "InstructionsLoaded",
+    "SessionEnd",
+)
+MARKER = "<!-- ai-workspace-managed -->"
+END_MARKER = "<!-- /ai-workspace-managed -->"
+HELPERS = {
+    "aiw-claude-workflow-audit": "claude-workflow-audit.mjs",
+    "aiw-code-graph": "code-graph",
+    "aiw-codex-workflow-audit": "codex-workflow-audit.mjs",
+    "aiw-memory-index": "memory-index",
+    "aiw-memory-lint": "memory-lint",
+    "aiw-memory-search": "memory-search",
+    "aiw-pr-review-context": "pr-review-context.mjs",
+    "aiw-task-context": "task-context",
+    "aiw-task-finish": "task-finish",
+}
+
+
+def atomic_text(path: Path, value: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(value)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def managed_text(path: Path, value: str, apply: bool) -> None:
+    body = value[len(MARKER):].lstrip("\n") if value.startswith(MARKER) else value
+    block = f"{MARKER}\n{body.rstrip()}\n{END_MARKER}\n"
+    existing = path.read_text(errors="replace") if path.exists() else ""
+    if existing.startswith(MARKER) and END_MARKER not in existing:
+        updated = block
+        action = "replace legacy"
+    elif MARKER in existing and END_MARKER in existing:
+        before, remainder = existing.split(MARKER, 1)
+        _, after = remainder.split(END_MARKER, 1)
+        updated = before.rstrip() + ("\n\n" if before.strip() else "") + block + after.lstrip("\n")
+        action = "update block"
+    elif existing:
+        updated = existing.rstrip() + "\n\n" + block
+        action = "append block"
+    else:
+        updated = block
+        action = "write"
+    print(f"{action if apply else f'would {action}'} {path}")
+    if apply:
+        atomic_text(path, updated)
+
+
+def clean_workspace_hook_groups(groups: object) -> list[object]:
+    if not isinstance(groups, list):
+        return []
+    cleaned = []
+    for group in groups:
+        if not isinstance(group, dict):
+            cleaned.append(group)
+            continue
+        handlers = group.get("hooks")
+        if not isinstance(handlers, list):
+            cleaned.append(group)
+            continue
+        kept = []
+        for handler in handlers:
+            command = handler.get("command", "") if isinstance(handler, dict) else ""
+            if "scripts/claude-hook.mjs" not in command:
+                kept.append(handler)
+        if kept:
+            copy = dict(group)
+            copy["hooks"] = kept
+            cleaned.append(copy)
+    return cleaned
+
+
+def install_settings(home: Path, apply: bool) -> None:
+    destination = home / ".claude/settings.json"
+    try:
+        settings = json.loads(destination.read_text()) if destination.exists() else {}
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid existing Claude settings: {error}") from error
+    if not isinstance(settings, dict):
+        raise SystemExit("existing Claude settings must contain a JSON object")
+
+    settings["outputStyle"] = "Concise"
+
+    environment = settings.setdefault("env", {})
+    if not isinstance(environment, dict):
+        raise SystemExit("existing Claude settings env must be a JSON object")
+    environment.update({
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
+    })
+
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise SystemExit("existing Claude settings hooks must be a JSON object")
+    command = f'node "{WORKSPACE / "scripts/claude-hook.mjs"}"'
+    handler = {"hooks": [{"type": "command", "command": command}]}
+    for event in EVENTS:
+        hooks[event] = [*clean_workspace_hook_groups(hooks.get(event)), handler]
+
+    serialized = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    print(f"{'merge' if apply else 'would merge'} {destination}")
+    if not apply:
+        return
+    if destination.exists():
+        backup = home / ".claude/backups/settings.before-ai-workspace.json"
+        if not backup.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(destination, backup)
+            print(f"backup {backup}")
+    atomic_text(destination, serialized, 0o600)
+
+
+def install_output_style(home: Path, apply: bool) -> None:
+    source = WORKSPACE / "global/OUTPUT_STYLE_CONCISE.md"
+    destination = home / ".claude/output-styles/concise.md"
+    if destination.exists() and MARKER not in destination.read_text(errors="replace"):
+        raise SystemExit(f"refusing to overwrite unmanaged file: {destination}")
+    print(f"{'write' if apply else 'would write'} {destination}")
+    if apply:
+        atomic_text(destination, source.read_text())
+
+
+def install_skill_links(home: Path, apply: bool) -> None:
+    source = WORKSPACE / ".ai/skills"
+    for tool_home in (home / ".claude/skills", home / ".codex/skills"):
+        if apply:
+            tool_home.mkdir(parents=True, exist_ok=True)
+        for skill in sorted(path for path in source.iterdir() if path.is_dir()):
+            destination = tool_home / skill.name
+            if destination.is_symlink() and destination.resolve() == skill.resolve():
+                print(f"ok   {destination}")
+            elif destination.exists() or destination.is_symlink():
+                print(f"skip {destination} (existing path)")
+            else:
+                print(f"{'link' if apply else 'would link'} {destination} -> {skill}")
+                if apply:
+                    destination.symlink_to(skill, target_is_directory=True)
+
+
+def install_helper_links(home: Path, apply: bool) -> None:
+    """Expose workspace helpers at stable paths that do not depend on cwd."""
+    destination_dir = home / ".local/bin"
+    if apply:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+    for name, script_name in HELPERS.items():
+        source = WORKSPACE / "scripts" / script_name
+        destination = destination_dir / name
+        if destination.is_symlink() and destination.resolve() == source.resolve():
+            print(f"ok   {destination}")
+        elif destination.exists() or destination.is_symlink():
+            print(f"skip {destination} (existing path)")
+        else:
+            print(f"{'link' if apply else 'would link'} {destination} -> {source}")
+            if apply:
+                destination.symlink_to(source)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--apply", action="store_true", help="write user-level adapters")
+    parser.add_argument("--home", type=Path, default=Path.home(), help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    home = args.home.expanduser().resolve()
+    rules = (WORKSPACE / "global/OPERATING_RULES.md").read_text()
+
+    managed_text(home / ".claude/CLAUDE.md", rules, args.apply)
+    managed_text(home / ".codex/AGENTS.md", rules, args.apply)
+    install_output_style(home, args.apply)
+    install_settings(home, args.apply)
+    install_skill_links(home, args.apply)
+    install_helper_links(home, args.apply)
+    if not args.apply:
+        print("dry run only; pass --apply to install")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,16 @@
+filters:
+  and:
+    - file.hasProperty("verified")
+    - '!file.inFolder("30-tasks")'
+    - '!file.inFolder("90-inbox")'
+    - '!file.inFolder("99-templates")'
+views:
+  - type: table
+    name: Durable knowledge
+    order:
+      - file.name
+      - type
+      - domain
+      - verified
+      - status
+      - updated

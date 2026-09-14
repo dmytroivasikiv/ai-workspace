@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Generate an edge-free portfolio Canvas from the logical project registry."""
+
+import json
+from workspace_lib import WORKSPACE, projects
+
+nodes = [
+    {
+        "id": "portfolio-intro",
+        "type": "text",
+        "text": "# Independent project portfolio\nProjects are isolated. Edges are added only after a dependency is confirmed in code or configuration.",
+        "x": 0,
+        "y": -260,
+        "width": 520,
+        "height": 160,
+        "color": "5",
+    }
+]
+for index, project in enumerate(projects()):
+    note = f"20-projects/{project['id']}/project.md"
+    placement = {
+        "x": (index % 3) * 440 - 440,
+        "y": (index // 3) * 300,
+        "width": 360,
+        "height": 220,
+    }
+    if (WORKSPACE / "memory" / note).is_file():
+        nodes.append({"id": f"project-{project['id']}", "type": "file", "file": note, **placement})
+    else:
+        nodes.append(
+            {
+                "id": f"project-{project['id']}",
+                "type": "text",
+                "text": f"# {project['id']}\n_No project note yet._\n\nDomain: {project.get('domain', '-')}\nStatus: {project.get('status', '-')}",
+                "color": "3",
+                **placement,
+            }
+        )
+canvas = {"nodes": nodes, "edges": []}
+target = WORKSPACE / "memory/Portfolio.canvas"
+target.write_text(json.dumps(canvas, indent=2) + "\n")
+print(target)

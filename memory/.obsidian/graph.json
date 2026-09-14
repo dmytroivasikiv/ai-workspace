@@ -1,0 +1,22 @@
+{
+  "collapse-filter": false,
+  "collapse-color-groups": false,
+  "collapse-display": false,
+  "collapse-forces": false,
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": true,
+  "showOrphans": true,
+  "colorGroups": [
+    {"query": "path:00-profile", "color": {"a": 1, "rgb": 5025616}},
+    {"query": "path:10-workspace", "color": {"a": 1, "rgb": 3447003}},
+    {"query": "path:20-projects", "color": {"a": 1, "rgb": 15844367}},
+    {"query": "path:30-tasks", "color": {"a": 1, "rgb": 10181046}},
+    {"query": "path:40-patterns", "color": {"a": 1, "rgb": 15105570}}
+  ],
+  "centerStrength": 0.45,
+  "repelStrength": 10,
+  "linkStrength": 1,
+  "linkDistance": 250,
+  "scale": 1
+}

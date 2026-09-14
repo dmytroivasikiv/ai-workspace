@@ -1,0 +1,6 @@
+interface:
+  display_name: "Inspect Repository Graph"
+  short_description: "Trace scoped architecture and impact on demand"
+  default_prompt: "Use $workspace-code-graph for this structural code question."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Run a QMD health check and embed every active memory document."""
+
+from __future__ import annotations
+
+import re
+import sys
+
+from workspace_lib import WORKSPACE, qmd
+
+marker = WORKSPACE / ".ai/state/qmd-semantic-disabled"
+if marker.exists() and "--force" not in sys.argv[1:]:
+    print(f"WARN semantic retrieval remains disabled; remove {marker} or rerun with --force after fixing the backend")
+    raise SystemExit(2)
+doctor = qmd("doctor", timeout=30)
+print(doctor.stdout, end="")
+if doctor.stderr:
+    print(doctor.stderr, end="")
+status = qmd("status", timeout=30)
+print(status.stdout, end="")
+if status.stderr:
+    print(status.stderr, end="")
+embed = qmd("embed", "--max-docs-per-batch", "8", "--max-batch-mb", "1", timeout=120)
+print(embed.stdout, end="")
+if embed.stderr:
+    print(embed.stderr, end="")
+after = qmd("doctor", timeout=30)
+print(after.stdout, end="")
+if after.stderr:
+    print(after.stderr, end="")
+status_after = qmd("status", timeout=30)
+match = re.search(r"Vectors:\s+(\d+) embedded", status_after.stdout)
+vectors = int(match.group(1)) if match else 0
+fresh = "all active documents match current fingerprint" in after.stdout
+if embed.returncode == 0 and after.returncode == 0 and vectors > 0 and fresh:
+    marker.unlink(missing_ok=True)
+    print(f"OK   semantic retrieval enabled ({vectors} vectors)")
+    raise SystemExit(0)
+marker.parent.mkdir(parents=True, exist_ok=True)
+reason = embed.stderr or embed.stdout or "QMD embed returned without creating vectors"
+marker.write_text(reason[-8192:] + "\n")
+print(f"WARN semantic retrieval disabled; lexical BM25 remains active ({marker})")
+raise SystemExit(embed.returncode or (1 if vectors == 0 else 0))

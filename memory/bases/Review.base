@@ -1,0 +1,13 @@
+filters:
+  or:
+    - verified != true
+    - status != "active"
+views:
+  - type: table
+    name: Needs review
+    order:
+      - file.name
+      - domain
+      - verified
+      - status
+      - updated

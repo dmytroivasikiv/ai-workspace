@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Search global preferences plus exactly one project's memory, max three hits."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from workspace_lib import WORKSPACE, project, qmd
+
+compact = "--compact" in sys.argv[1:]
+semantic = "--semantic" in sys.argv[1:]
+no_refresh = "--no-refresh" in sys.argv[1:]
+arguments = [value for value in sys.argv[1:] if not value.startswith("--")]
+if len(arguments) < 2:
+    print("Usage: scripts/memory-search [--semantic] [--no-refresh] [--compact] <project-id> <terms>", file=sys.stderr)
+    raise SystemExit(64)
+
+project_id, terms = arguments[0], " ".join(arguments[1:]).strip()
+project_id = project(project_id)["id"]
+if len(terms.encode()) > 240:
+    print("ERROR search terms must be at most 240 bytes", file=sys.stderr)
+    raise SystemExit(64)
+
+marker = WORKSPACE / ".qmd/last-index"
+notes = [p for p in (WORKSPACE / "memory").rglob("*.md") if "90-inbox" not in p.parts and "99-templates" not in p.parts]
+stale = not marker.exists() or any(path.stat().st_mtime > marker.stat().st_mtime for path in notes)
+if stale and not no_refresh:
+    refresh = subprocess.run(
+        [str(WORKSPACE / "scripts/memory-index")], cwd=WORKSPACE,
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120,
+    )
+    if refresh.returncode:
+        print(refresh.stderr.strip() or "memory index refresh failed", file=sys.stderr)
+        raise SystemExit(refresh.returncode)
+
+collections = [
+    "global-profile", "global-workspace", "global-colleagues", "global-patterns",
+    f"project-{project_id}", f"tasks-{project_id}",
+]
+filters: list[str] = []
+for collection in collections:
+    filters.extend(["-c", collection])
+
+disabled = WORKSPACE / ".ai/state/qmd-semantic-disabled"
+if semantic and not disabled.exists():
+    query = f"intent: Retrieve a verified memory note relevant to project {project_id}.\nlex: {terms}\nvec: {terms}"
+    result = qmd("query", query, *filters, "-n", "3", "--no-rerank", "--format", "md", "--full-path", timeout=45)
+    if result.returncode == 0:
+        print(result.stdout, end="")
+        raise SystemExit(0)
+    disabled.parent.mkdir(parents=True, exist_ok=True)
+    disabled.write_text((result.stderr or "semantic query failed")[-4096:] + "\n")
+    print("WARN semantic retrieval failed; using lexical BM25", file=sys.stderr)
+elif semantic and disabled.exists():
+    print("WARN semantic retrieval disabled; using lexical BM25", file=sys.stderr)
+
+result = qmd("search", terms, *filters, "-n", "3", "--format", "md", "--full-path")
+
+if compact:
+    import re
+
+    def headline(note: Path) -> tuple[str, str]:
+        head = note.read_text(errors="replace")[:1200]
+        name = re.search(r"^name:\s*(.+?)\s*$", head, re.MULTILINE)
+        description = re.search(r"^description:\s*(.+?)\s*$", head, re.MULTILINE)
+        title = (name.group(1) if name else note.stem).strip("'\"")
+        summary = (description.group(1) if description else "").strip("'\"")
+        return title, summary
+
+    seen: list[str] = []
+    for match in re.findall(r"\*\*file:\*\*\s*`([^`]+)`", result.stdout):
+        relative = match.split("./", 1)[-1] if match.startswith("./") else match
+        note = WORKSPACE / relative
+        if not note.is_file() or relative in seen:
+            continue
+        seen.append(relative)
+        title, summary = headline(note)
+        line = f"  - {title} ({relative})"
+        if summary:
+            line += f" — {summary}"
+        print(line[:200])
+    raise SystemExit(0 if seen else 1)
+
+if result.stdout:
+    print(result.stdout, end="")
+if result.stderr:
+    print(result.stderr, end="", file=sys.stderr)
+raise SystemExit(result.returncode)

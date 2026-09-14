@@ -1,0 +1,69 @@
+{
+  "outputStyle": "Concise",
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/absolute/path/to/ai-workspace/scripts/claude-hook.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

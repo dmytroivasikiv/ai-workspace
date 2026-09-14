@@ -1,0 +1,15 @@
+filters:
+  or:
+    - verified != true
+    - updated < today() - "90d"
+views:
+  - type: table
+    name: Freshness
+    groupBy:
+      property: domain
+      direction: ASC
+    order:
+      - file.name
+      - domain
+      - verified
+      - updated

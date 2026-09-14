@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Upgrade notes written by Claude's native memory tool to the shared durable schema.
+
+Claude Code writes `name`/`description`/`metadata`; the shared vault additionally
+requires `type`, `domain`, `repos`, `status`, `verified`, `updated` and `sources` so
+Codex, the lexical index and a teammate reading the repository all see the same facts.
+The merged frontmatter is a superset, so both readers keep working.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+import sys
+from pathlib import Path
+from workspace_lib import WORKSPACE, projects
+
+MEMORY = WORKSPACE / "memory"
+SKIP_TOP = {"90-inbox", "99-templates", "bases", ".obsidian"}
+SKIP_FILES = {"Home.md", "MEMORY.md"}
+NATIVE_TO_TYPE = {
+    "user": "preference",
+    "feedback": "rule",
+    "project": "project-fact",
+    "reference": "reference",
+}
+DEFAULT_SOURCE = "explicit-user-feedback"
+apply = "--apply" in sys.argv[1:]
+
+
+def split_frontmatter(text: str) -> tuple[list[str], str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return [], text
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return lines[1:index], "\n".join(lines[index + 1:])
+    return [], text
+
+
+def top_level_keys(block: list[str]) -> set[str]:
+    return {
+        match.group(1)
+        for match in (re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line) for line in block)
+        if match
+    }
+
+
+def scalar(block: list[str], key: str) -> str:
+    for line in block:
+        match = re.match(rf"^{re.escape(key)}:\s*(.*?)\s*$", line)
+        if match:
+            return match.group(1).strip("'\"")
+    return ""
+
+
+def nested_scalar(block: list[str], parent: str, key: str) -> str:
+    inside = False
+    for line in block:
+        if re.match(rf"^{re.escape(parent)}:\s*$", line.rstrip()):
+            inside = True
+            continue
+        if inside:
+            if not line.startswith((" ", "\t")):
+                break
+            match = re.match(rf"^\s+{re.escape(key)}:\s*(.*?)\s*$", line)
+            if match:
+                return match.group(1).strip("'\"")
+    return ""
+
+
+def domain_for(relative: Path, block: list[str]) -> tuple[str, list[str]]:
+    parts = relative.parts
+    known = {project["id"] for project in projects()}
+    if len(parts) > 1 and parts[1] in known:
+        project_id = parts[1]
+        repos = [repo["id"] for project in projects() if project["id"] == project_id
+                 for repo in project.get("repos", [])]
+        return project_id, repos
+    for project in projects():
+        if project["id"] in scalar(block, "name") or project["id"] in relative.name:
+            return project["id"], []
+    return "global", []
+
+
+def modified_date(block: list[str]) -> str:
+    stamp = nested_scalar(block, "metadata", "modified") or scalar(block, "updated")
+    if stamp:
+        try:
+            return dt.date.fromisoformat(stamp[:10]).isoformat()
+        except ValueError:
+            pass
+    return dt.date.today().isoformat()
+
+
+changed: list[str] = []
+for path in sorted(MEMORY.rglob("*.md")):
+    relative = path.relative_to(MEMORY)
+    if path.name in SKIP_FILES or relative.parts[0] in SKIP_TOP:
+        continue
+    text = path.read_text(errors="replace")
+    block, body = split_frontmatter(text)
+    if not block:
+        continue
+    present = top_level_keys(block)
+    required = {"type", "domain", "repos", "status", "verified", "updated", "sources"}
+    if required <= present:
+        continue
+
+    domain, repos = domain_for(relative, block)
+    native_type = nested_scalar(block, "metadata", "type")
+    additions: list[str] = []
+    if "type" not in present:
+        additions.append(f"type: {NATIVE_TO_TYPE.get(native_type, 'pattern')}")
+    if "domain" not in present:
+        additions.append(f"domain: {domain}")
+    if "repos" not in present:
+        additions.append("repos: []" if not repos else "repos:\n" + "\n".join(f"  - {r}" for r in repos))
+    if "status" not in present:
+        additions.append("status: active")
+    if "verified" not in present:
+        additions.append("verified: true")
+    if "updated" not in present:
+        additions.append(f"updated: {modified_date(block)}")
+    if "sources" not in present:
+        additions.append(f"sources:\n  - {DEFAULT_SOURCE}")
+
+    merged = "---\n" + "\n".join([*block, *additions]) + "\n---\n" + body
+    if not merged.endswith("\n"):
+        merged += "\n"
+    changed.append(str(relative))
+    if apply:
+        path.write_text(merged)
+
+for name in changed:
+    print(f"{'normalized' if apply else 'would normalize'} memory/{name}")
+print(f"{len(changed)} note(s){'' if apply else ' — pass --apply to write'}")

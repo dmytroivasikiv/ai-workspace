@@ -1,0 +1,15 @@
+{
+  "file-explorer": true,
+  "global-search": true,
+  "backlink": true,
+  "outgoing-link": true,
+  "graph": true,
+  "canvas": true,
+  "properties": true,
+  "bases": true,
+  "templates": true,
+  "outline": true,
+  "bookmarks": true,
+  "page-preview": true,
+  "file-recovery": true
+}

@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Run portable repository checks without QMD, Graphify, Obsidian, or user adapters."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+
+WORKSPACE = Path(__file__).resolve().parents[1]
+failures = 0
+
+
+def check(condition: bool, label: str) -> None:
+    global failures
+    if condition:
+        print(f"OK   {label}")
+    else:
+        failures += 1
+        print(f"FAIL {label}")
+
+
+for path in sorted(WORKSPACE.glob("scripts/*")):
+    if not path.is_file():
+        continue
+    first = path.read_text(errors="replace").splitlines()[:1]
+    if first and "python3" in first[0]:
+        try:
+            compile(path.read_text(), str(path), "exec")
+            check(True, f"Python syntax {path.name}")
+        except SyntaxError:
+            check(False, f"Python syntax {path.name}")
+
+for path in sorted(WORKSPACE.glob("scripts/*.mjs")):
+    result = subprocess.run(["node", "--check", str(path)], check=False, stdout=subprocess.DEVNULL)
+    check(result.returncode == 0, f"Node syntax {path.name}")
+
+for path in [WORKSPACE / "workspace.yaml.example", WORKSPACE / ".claude/settings.json", *WORKSPACE.glob("memory/.obsidian/*.json")]:
+    try:
+        json.loads(path.read_text())
+        check(True, f"JSON {path.relative_to(WORKSPACE)}")
+    except (OSError, json.JSONDecodeError):
+        check(False, f"JSON {path.relative_to(WORKSPACE)}")
+
+lint = subprocess.run([str(WORKSPACE / "scripts/memory-lint")], cwd=WORKSPACE, check=False)
+check(lint.returncode == 0, "memory lint")
+skip_dirs = {".git", ".qmd", ".graphify", ".cache", ".trash", "__pycache__", "dist", "tmp", "node_modules"}
+portable_text = []
+for path in WORKSPACE.rglob("*"):
+    if not path.is_file() or any(part in skip_dirs for part in path.parts):
+        continue
+    relative = path.relative_to(WORKSPACE)
+    if relative.parts[:2] == (".ai", "state") or path.stat().st_size > 1024 * 1024:
+        continue
+    portable_text.append(path.read_text(errors="replace"))
+home_prefix = "/" + "Users" + "/"
+check(home_prefix not in "\n".join(portable_text), "no macOS home paths")
+
+print(f"SUMMARY {failures} failure(s)")
+raise SystemExit(min(failures, 125))

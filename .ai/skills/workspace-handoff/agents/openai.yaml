@@ -1,0 +1,6 @@
+interface:
+  display_name: "Create Task Handoff"
+  short_description: "Write a compact cross-agent continuation anchor"
+  default_prompt: "Use $workspace-handoff to create or update the current task anchor."
+policy:
+  allow_implicit_invocation: true

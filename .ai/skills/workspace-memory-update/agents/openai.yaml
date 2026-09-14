@@ -1,0 +1,6 @@
+interface:
+  display_name: "Update Workspace Memory"
+  short_description: "Persist a verified correction in the narrowest place"
+  default_prompt: "Use $workspace-memory-update to store this verified reusable lesson."
+policy:
+  allow_implicit_invocation: true

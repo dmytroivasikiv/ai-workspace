@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Diagnose the personal AI workspace without network or Git mutations."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from workspace_lib import WORKSPACE, projects, qmd, resolve
+
+strict = "--strict" in sys.argv[1:]
+errors = 0
+warnings = 0
+
+
+def check(condition: bool, message: str, *, warning: bool = False) -> None:
+    global errors, warnings
+    if condition:
+        print(f"OK   {message}")
+    elif warning:
+        warnings += 1
+        print(f"WARN {message}")
+    else:
+        errors += 1
+        print(f"FAIL {message}")
+
+
+check((WORKSPACE / "AGENTS.md").is_file(), "root AGENTS.md")
+check((WORKSPACE / "CLAUDE.md").is_file(), "root CLAUDE.md")
+try:
+    registry = json.loads((WORKSPACE / "workspace.yaml").read_text())
+    check(registry.get("schema") == 3, "workspace.yaml schema")
+except Exception:
+    registry = {"projects": []}
+    check(False, "workspace.yaml parses as JSON-compatible YAML")
+
+agents_words = len((WORKSPACE / "AGENTS.md").read_text().split())
+check(agents_words <= 750, f"root guide budget ({agents_words}/750 words)")
+
+skills = [path for path in (WORKSPACE / ".ai/skills").iterdir() if path.is_dir()]
+check(len(skills) >= 7, f"shared skills ({len(skills)})")
+for skill in skills:
+    check((skill / "SKILL.md").is_file(), f"{skill.name}/SKILL.md")
+    check((skill / "agents/openai.yaml").is_file(), f"{skill.name}/agents/openai.yaml")
+
+for link in (WORKSPACE / ".agents/skills", WORKSPACE / ".claude/skills"):
+    check(link.is_symlink() and link.resolve() == (WORKSPACE / ".ai/skills").resolve(), f"shared skill link {link.relative_to(WORKSPACE)}")
+
+required_scripts = ["bootstrap-ai", "setup-workspace", "demo-workspace", "project-add", "ci-check", "install-user-adapters", "workspace-status", "task-context", "task-finish", "memory-configure", "memory-search", "memory-index", "memory-lint", "memory-semantic-check", "code-graph", "pr-review-context.mjs", "claude-hook.mjs", "claude-workflow-audit.mjs", "codex-workflow-audit.mjs", "obsidian-refresh", "doctor-ai", "test-ai-harness"]
+for name in required_scripts:
+    path = WORKSPACE / "scripts" / name
+    check(path.is_file() and os.access(path, os.X_OK), f"executable scripts/{name}")
+
+settings_path = WORKSPACE / ".claude/settings.json"
+try:
+    settings_text = settings_path.read_text()
+    settings = json.loads(settings_text)
+    check(True, "Claude settings JSON")
+except Exception:
+    settings_text, settings = "", {}
+    check(False, "Claude settings JSON")
+for forbidden in ("PreToolUse", "PostToolUse", "PostToolBatch", '"Stop"', "skillOverrides", "effortLevel", "CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS"):
+    check(forbidden not in settings_text, f"Claude settings omit {forbidden}")
+check(not settings.get("hooks"), "project Claude settings do not duplicate global hooks")
+
+user_rules = Path.home() / ".claude/CLAUDE.md"
+codex_rules = Path.home() / ".codex/AGENTS.md"
+check(user_rules.is_file() and "<!-- ai-workspace-managed -->" in user_rules.read_text(errors="replace"), "global Claude operating rules", warning=True)
+check(codex_rules.is_file() and "<!-- ai-workspace-managed -->" in codex_rules.read_text(errors="replace"), "global Codex operating rules", warning=True)
+concise_style = Path.home() / ".claude/output-styles/concise.md"
+check(concise_style.is_file() and "keep-coding-instructions: true" in concise_style.read_text(errors="replace"), "global concise Claude output style", warning=True)
+user_settings_path = Path.home() / ".claude/settings.json"
+try:
+    user_settings_text = user_settings_path.read_text()
+    user_settings = json.loads(user_settings_text)
+    check(True, "global Claude settings JSON")
+except Exception:
+    user_settings_text, user_settings = "", {}
+    check(False, "global Claude settings JSON", warning=True)
+allowed_hooks = {"SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "InstructionsLoaded", "SessionEnd"}
+workspace_hook_events = set()
+for event, groups in user_settings.get("hooks", {}).items():
+    for group in groups if isinstance(groups, list) else []:
+        for handler in group.get("hooks", []) if isinstance(group, dict) else []:
+            if "scripts/claude-hook.mjs" in handler.get("command", ""):
+                workspace_hook_events.add(event)
+check(workspace_hook_events == allowed_hooks, "global advisory Claude hooks installed once per lifecycle event", warning=True)
+check("$CLAUDE_PROJECT_DIR" not in user_settings_text, "global hooks are cwd-independent", warning=True)
+check(user_settings.get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "500000", "global auto-compact window", warning=True)
+check(user_settings.get("env", {}).get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") == "70", "global auto-compact threshold", warning=True)
+check(user_settings.get("outputStyle") == "Concise", "global Claude output style selected", warning=True)
+for forbidden in ("PreToolUse", "PostToolUse", "PostToolBatch", '"Stop"', "skillOverrides", "effortLevel", "CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS"):
+    check(forbidden not in user_settings_text, f"global Claude settings omit {forbidden}", warning=True)
+
+helper_targets = {
+    "aiw-claude-workflow-audit": "claude-workflow-audit.mjs",
+    "aiw-code-graph": "code-graph",
+    "aiw-codex-workflow-audit": "codex-workflow-audit.mjs",
+    "aiw-memory-index": "memory-index",
+    "aiw-memory-lint": "memory-lint",
+    "aiw-memory-search": "memory-search",
+    "aiw-pr-review-context": "pr-review-context.mjs",
+    "aiw-task-context": "task-context",
+    "aiw-task-finish": "task-finish",
+}
+for name, target in helper_targets.items():
+    helper = Path.home() / ".local/bin" / name
+    check(
+        helper.is_symlink() and helper.resolve() == (WORKSPACE / "scripts" / target).resolve(),
+        f"cwd-independent helper {name}",
+        warning=True,
+    )
+
+lint = subprocess.run([str(WORKSPACE / "scripts/memory-lint")], cwd=WORKSPACE, check=False, stdout=subprocess.PIPE, text=True)
+check(lint.returncode == 0, "durable memory lint")
+
+check(shutil.which("qmd") is not None, "QMD installed")
+qmd_status = qmd("status")
+check(qmd_status.returncode == 0, "workspace-local QMD index", warning=True)
+semantic_disabled = (WORKSPACE / ".ai/state/qmd-semantic-disabled").exists()
+if semantic_disabled:
+    check(False, "QMD semantic retrieval disabled after failed controlled embed; lexical BM25 is active", warning=True)
+else:
+    check(True, "QMD semantic backend healthy")
+collection_list = qmd("collection", "list")
+if collection_list.returncode == 0:
+    listed = set(re.findall(r"^(\S+) \(qmd://", collection_list.stdout, re.MULTILINE))
+    expected = {"global-profile", "global-workspace", "global-colleagues", "global-patterns"}
+    for row in projects():
+        expected.add(f"project-{row['id']}")
+        expected.add(f"tasks-{row['id']}")
+    missing = sorted(expected - listed)
+    if missing:
+        check(False, f"QMD collection missing for {', '.join(missing)}; run scripts/memory-configure")
+    else:
+        check(True, f"QMD collections match global and project scopes ({len(expected)} collections)")
+else:
+    check(False, "QMD collection list readable", warning=True)
+
+check(shutil.which("graphify") is not None, "Graphify installed")
+for project in projects():
+    for repo in project.get("repos", []):
+        if repo.get("graph") not in {"on-demand", "persistent", "disabled"}:
+            check(False, f"repository {repo['id']} has an unknown graph policy {repo.get('graph')!r}")
+check(shutil.which("obsidian") is not None or Path("/Applications/Obsidian.app").exists(), "Obsidian installed")
+vault = WORKSPACE / "memory/.obsidian"
+check((vault / "core-plugins.json").is_file(), "Obsidian vault configured")
+canvas = WORKSPACE / "memory/Portfolio.canvas"
+if canvas.is_file():
+    try:
+        nodes = json.loads(canvas.read_text()).get("nodes", [])
+        targets = [node["file"] for node in nodes if node.get("file")]
+        stale = [target for target in targets if not (WORKSPACE / "memory" / target).exists()]
+        registered = {row["id"] for row in projects()}
+        charted = {
+            node["id"][len("project-"):]
+            for node in nodes
+            if str(node.get("id", "")).startswith("project-")
+        }
+        check(not stale, f"portfolio canvas targets exist ({', '.join(stale) or 'all'})", warning=True)
+        check(
+            registered <= charted,
+            f"portfolio canvas covers every project ({len(charted)} charted)"
+            if registered <= charted
+            else f"portfolio canvas missing {', '.join(sorted(registered - charted))}; run scripts/obsidian-refresh",
+            warning=True,
+        )
+    except (ValueError, KeyError):
+        check(False, "portfolio canvas parses", warning=True)
+
+seen_repos: set[str] = set()
+for project in projects():
+    project_root = resolve(project.get("path", ""))
+    if len(project.get("repos", [])) > 1:
+        check((project_root / "CLAUDE.md").is_file(), f"logical project {project.get('id', '?')} root Claude guide", warning=True)
+        check((project_root / "AGENTS.md").is_file(), f"logical project {project.get('id', '?')} root Codex guide", warning=True)
+    check(bool(project.get("id")) and resolve(project.get("path", "")).exists(), f"project {project.get('id', '?')} root")
+    for repo in project.get("repos", []):
+        repo_id = repo.get("id", "?")
+        check(repo_id not in seen_repos, f"unique repository id {repo_id}")
+        seen_repos.add(repo_id)
+        root = resolve(repo.get("path", ""))
+        check(root.exists(), f"repository {repo_id} exists")
+        guide = root / repo.get("guide", "")
+        check(guide.is_file(), f"repository {repo_id} guide")
+        if guide.is_file():
+            words = len(guide.read_text(errors="replace").split())
+            check(words <= 1500, f"repository {repo_id} guide budget ({words}/1500)", warning=True)
+        policy = repo.get("graph")
+        if policy in {"on-demand", "persistent"}:
+            result = subprocess.run([str(WORKSPACE / "scripts/code-graph"), "status", repo_id], cwd=WORKSPACE, check=False, text=True, stdout=subprocess.PIPE)
+            detail = result.stdout.strip() or "missing/stale"
+            if result.returncode == 0:
+                check(True, f"repository {repo_id} graph fresh")
+            elif policy == "on-demand" and "missing" in detail:
+                check(True, f"repository {repo_id} graph not built (on-demand, expected)")
+            else:
+                check(False, f"repository {repo_id} graph {detail}", warning=True)
+
+if warnings:
+    print(f"SUMMARY {errors} error(s), {warnings} warning(s){' (strict)' if strict else ''}")
+else:
+    print(f"SUMMARY {errors} error(s), no warnings")
+raise SystemExit(min(errors + (warnings if strict else 0), 125))

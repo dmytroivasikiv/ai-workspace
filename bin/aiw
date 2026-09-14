@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command="${1:-help}"
+[[ $# -eq 0 ]] || shift
+
+case "$command" in
+  status) exec "$workspace/scripts/workspace-status" "$@" ;;
+  doctor) exec "$workspace/scripts/doctor-ai" "$@" ;;
+  test) exec "$workspace/scripts/test-ai-harness" "$@" ;;
+  bootstrap) exec "$workspace/scripts/bootstrap-ai" "$@" ;;
+  setup) exec "$workspace/scripts/setup-workspace" "$@" ;;
+  demo) exec "$workspace/scripts/demo-workspace" "$@" ;;
+  add-project) exec "$workspace/scripts/project-add" "$@" ;;
+  adapters) exec "$workspace/scripts/install-user-adapters" "$@" ;;
+  ci-check) exec "$workspace/scripts/ci-check" "$@" ;;
+  context) exec "$workspace/scripts/task-context" "$@" ;;
+  finish) exec "$workspace/scripts/task-finish" "$@" ;;
+  graph) exec "$workspace/scripts/code-graph" "$@" ;;
+  audit-claude) exec "$workspace/scripts/claude-workflow-audit.mjs" "$@" ;;
+  audit-codex) exec "$workspace/scripts/codex-workflow-audit.mjs" "$@" ;;
+  memory-search) exec "$workspace/scripts/memory-search" "$@" ;;
+  memory-index) exec "$workspace/scripts/memory-index" "$@" ;;
+  memory-lint) exec "$workspace/scripts/memory-lint" "$@" ;;
+  memory-configure) exec "$workspace/scripts/memory-configure" "$@" ;;
+  memory-semantic-check) exec "$workspace/scripts/memory-semantic-check" "$@" ;;
+  obsidian-refresh) exec "$workspace/scripts/obsidian-refresh" "$@" ;;
+  version|--version|-v) cat "$workspace/VERSION" ;;
+  help|-h|--help)
+    printf '%s\n' \
+      'Usage: bin/aiw <command> [args]' \
+      '' \
+      'Commands: setup, demo, add-project, adapters, status, doctor, test,' \
+      '          bootstrap, context, finish, graph, ci-check,' \
+      '          audit-claude, audit-codex,' \
+      '          memory-search, memory-index, memory-lint, memory-configure,' \
+      '          memory-semantic-check,' \
+      '          obsidian-refresh, version'
+    ;;
+  *) printf 'Unknown command: %s\n' "$command" >&2; exit 64 ;;
+esac

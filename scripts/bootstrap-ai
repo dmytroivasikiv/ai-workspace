@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Wire shared host skills and optionally non-invasive repo-local links."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from workspace_lib import WORKSPACE, git, projects, resolve, run
+
+repo_links = "--repo-links" in sys.argv[1:]
+user_adapters = "--user-adapters" in sys.argv[1:]
+canonical = WORKSPACE / ".ai/skills"
+
+
+def ensure_link(link: Path, target: Path) -> None:
+    if link.is_symlink() and link.resolve() == target.resolve():
+        print(f"ok   {link}")
+        return
+    if link.exists() or link.is_symlink():
+        print(f"skip {link} (existing path)")
+        return
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(target, link.parent))
+    print(f"link {link} -> {target}")
+
+
+ensure_link(WORKSPACE / ".agents/skills", canonical)
+ensure_link(WORKSPACE / ".claude/skills", canonical)
+
+if user_adapters:
+    result = run(str(WORKSPACE / "scripts/install-user-adapters"), "--apply", timeout=30)
+    print(result.stdout, end="")
+    if result.returncode:
+        print(result.stderr, file=sys.stderr, end="")
+        raise SystemExit(result.returncode)
+
+for project in projects():
+    for repo in project.get("repos", []):
+        root = resolve(repo["path"])
+        if not root.exists():
+            print(f"skip {repo['id']} (missing)")
+            continue
+        guide = root / repo["guide"]
+        print(f"{'ok  ' if guide.is_file() else 'WARN'} {repo['id']} guide={repo['guide']}")
+        if not repo_links:
+            continue
+        for relative in (Path(".agents/skills"), Path(".claude/skills")):
+            ensure_link(root / relative, canonical)
+        exclude_result = git(root, "rev-parse", "--git-path", "info/exclude")
+        exclude = Path(exclude_result.stdout.strip())
+        if not exclude.is_absolute():
+            exclude = root / exclude
+        existing = exclude.read_text() if exclude.exists() else ""
+        marker = "# ai-workspace shared skill links"
+        if marker not in existing:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(existing.rstrip() + f"\n\n{marker}\n/.agents/skills\n/.claude/skills\n")
+            print(f"ok   local exclude {repo['id']}")

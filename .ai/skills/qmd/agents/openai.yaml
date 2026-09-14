@@ -1,0 +1,6 @@
+interface:
+  display_name: "Search Scoped Memory"
+  short_description: "Retrieve global preferences plus one project's notes"
+  default_prompt: "Use $qmd to search the relevant scoped workspace memory."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Print one bounded row per logical project without network access."""
+
+from pathlib import Path
+from workspace_lib import git_state, projects, resolve
+
+print(f"{'PROJECT':22} {'STATE':8} REPOSITORY BRANCHES")
+for project in projects():
+    states = []
+    branches = []
+    for repo in project.get("repos", []):
+        path = resolve(repo["path"])
+        if repo.get("present") is False:
+            branch, state = "-", "planned"
+        elif not path.exists():
+            branch, state = "-", "missing"
+        elif not (path / ".git").exists():
+            branch, state = "-", "no-git"
+        else:
+            branch, state = git_state(path)
+        if state != "planned":
+            states.append(state)
+        branches.append(f"{repo['id']}={branch}")
+    overall = next((s for s in ("missing", "no-git", "dirty") if s in states), "clean")
+    summary = ", ".join(branches)
+    if len(summary) > 160:
+        summary = summary[:157] + "..."
+    print(f"{project['id'][:22]:22} {overall:8} {summary}")

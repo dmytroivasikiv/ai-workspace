@@ -1,0 +1,6 @@
+interface:
+  display_name: "Start Workspace Task"
+  short_description: "Resolve one project and gather bounded context"
+  default_prompt: "Use $workspace-task-start to scope this non-trivial task."
+policy:
+  allow_implicit_invocation: true
